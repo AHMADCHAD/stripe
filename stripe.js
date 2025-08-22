@@ -2,8 +2,10 @@ import express from "express";
 import Stripe from "stripe";
 import bodyParser from "body-parser";
 // Firebase
-import { db } from "./config.js";
+import { db } from "./firebase.js";
 import { doc, getDoc, updateDoc } from "firebase/firestore";
+import dotenv from 'dotenv';
+dotenv.config();
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY); // ✅ Read from env
 
@@ -13,6 +15,7 @@ app.use(express.json());
 // ------------------- Test Endpoint -------------------
 // ------------------- Test Endpoint -------------------
 app.get("/hello", (req, res) => {
+  console.log("Stripe key:", process.env.STRIPE_SECRET_KEY);
   res.json({
     message: "Hello! The server is running with full potential 🚀",
     stripeKey: process.env.STRIPE_SECRET_KEY // ⚠️ remove if you don’t want to expose your secret key
