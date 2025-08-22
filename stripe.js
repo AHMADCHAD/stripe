@@ -42,6 +42,7 @@ app.post("/create-connectId", async (req, res) => {
       return res.status(404).json({ error: "Ambassador not found" });
     }
 
+    // ✅ Create Stripe account
     const account = await stripe.accounts.create({
       type: "express",
       country: "US",
@@ -52,18 +53,20 @@ app.post("/create-connectId", async (req, res) => {
 
     console.log("✅ Stripe account created:", account);
 
-    await updateDoc(ambassadorRef, {
-      stripe: {
-        connectAccountId: account.id,
-        onboardingCompleted: account.details_submitted || false,
-        chargesEnabled: account.charges_enabled || false,
-        payoutsEnabled: account.payouts_enabled || false,
-        disabledReason: account.requirements?.disabled_reason || null,
-        currentlyDue: account.requirements?.currently_due || [],
-        eventuallyDue: account.requirements?.eventually_due || [],
-        pastDue: account.requirements?.past_due || [],
-      },
-    });
+    // 🔹 Prepare Firestore object to match Stripe structure
+    const stripeData = {
+      connectAccountId: account.id,
+      onboardingCompleted: account.details_submitted || false,
+      chargesEnabled: account.charges_enabled || false,
+      payoutsEnabled: account.payouts_enabled || false,
+      disabledReason: account.requirements?.disabled_reason || null,
+      currentlyDue: account.requirements?.currently_due || [],
+      eventuallyDue: account.requirements?.eventually_due || [],
+      pastDue: account.requirements?.past_due || [],
+      stripeOnboardingUrl: null, // Will be updated when onboarding link is created
+    };
+
+    await updateDoc(ambassadorRef, { stripe: stripeData });
 
     console.log("✅ Firestore updated for ambassador:", userId);
 
@@ -79,6 +82,7 @@ app.post("/create-connectId", async (req, res) => {
 
 
 // ------------------- 2️⃣ Generate Onboarding Link -------------------
+// ------------------- 2️⃣ Generate Onboarding Link -------------------
 app.post("/onboarding-link", async (req, res) => {
   const { userId, connectAccountId } = req.body;
 
@@ -90,42 +94,49 @@ app.post("/onboarding-link", async (req, res) => {
     // ✅ Generate onboarding link
     const accountLink = await stripe.accountLinks.create({
       account: connectAccountId,
-      refresh_url: "http://localhost:5000/reauth",  // 🔧 update in production
-      return_url: "http://localhost:5000/success",  // 🔧 update in production
+      // refresh_url: "http://localhost:5000/reauth",  // 🔧 update in production
+      // return_url: "http://localhost:5000/success",  // 🔧 update in production
       type: "account_onboarding",
     });
 
     // ✅ Fetch latest account details from Stripe
     const account = await stripe.accounts.retrieve(connectAccountId);
 
-    // ✅ Save onboarding link + updated stripe status in ambassador doc
+    console.log("✅ Stripe account fetched for onboarding update:", account.id);
+
+    // 🔹 Prepare Firestore object to match Stripe structure
+    const stripeData = {
+      stripeOnboardingUrl: accountLink.url,
+      connectAccountId: account.id,
+      onboardingCompleted: account.details_submitted || false,
+      chargesEnabled: account.charges_enabled || false,
+      payoutsEnabled: account.payouts_enabled || false,
+      disabledReason: account.requirements?.disabled_reason || null,
+      currentlyDue: account.requirements?.currently_due || [],
+      eventuallyDue: account.requirements?.eventually_due || [],
+      pastDue: account.requirements?.past_due || [],
+    };
+
+    // ✅ Save updated stripe status in Firestore
     const ambassadorRef = doc(db, "ambassadors", userId);
-    await updateDoc(ambassadorRef, {
-      stripe: {
-        stripeOnboardingUrl: accountLink.url,
-        connectAccountId: account.id,
-        onboardingCompleted: account.details_submitted || false,
-        chargesEnabled: account.charges_enabled || false,
-        payoutsEnabled: account.payouts_enabled || false,
-        disabledReason: account.requirements?.disabled_reason || null,
-        currentlyDue: account.requirements?.currently_due || [],
-        eventuallyDue: account.requirements?.eventually_due || [],
-        pastDue: account.requirements?.past_due || [],
-      }
-    });
+    await updateDoc(ambassadorRef, { stripe: stripeData });
+
+    console.log("✅ Firestore updated with onboarding link for ambassador:", userId);
 
     res.json({
       message: "Onboarding link generated",
-      onboardingUrl: accountLink.url
+      onboardingUrl: accountLink.url,
     });
   } catch (err) {
-    console.error("Error generating onboarding link:", err);
+    console.error("🔥 Error generating onboarding link:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
+
 // Use raw body parser for Stripe webhooks
 app.post("/webhook", bodyParser.raw({ type: "application/json" }), (req, res) => {
+  console.log('📩 Webhook called');
   const sig = req.headers["stripe-signature"];
 
   let event;
@@ -146,13 +157,13 @@ app.post("/webhook", bodyParser.raw({ type: "application/json" }), (req, res) =>
       const account = event.data.object;
       console.log("🔔 Account updated:", account.id);
 
-      // ✅ Get ambassador ID from metadata
-      const ambassadorId = account.metadata.ambassadorId;
+      const ambassadorId = account.metadata?.ambassadorId;
 
       if (ambassadorId) {
         const ambassadorRef = doc(db, "ambassadors", ambassadorId);
 
         const stripeStatus = {
+          connectAccountId: account.id,
           onboardingCompleted: account.details_submitted || false,
           chargesEnabled: account.charges_enabled || false,
           payoutsEnabled: account.payouts_enabled || false,
@@ -160,6 +171,7 @@ app.post("/webhook", bodyParser.raw({ type: "application/json" }), (req, res) =>
           currentlyDue: account.requirements?.currently_due || [],
           eventuallyDue: account.requirements?.eventually_due || [],
           pastDue: account.requirements?.past_due || [],
+          stripeOnboardingUrl: account.stripeOnboardingUrl || null, // if available
         };
 
         updateDoc(ambassadorRef, { stripe: stripeStatus })
@@ -170,7 +182,6 @@ app.post("/webhook", bodyParser.raw({ type: "application/json" }), (req, res) =>
       }
       break;
 
-
     case "account.application.deauthorized":
       const deauthAccount = event.data.object;
       console.log("⚠️ Account deauthorized:", deauthAccount.id);
@@ -180,13 +191,15 @@ app.post("/webhook", bodyParser.raw({ type: "application/json" }), (req, res) =>
         const ambassadorRef = doc(db, "ambassadors", deAuthAmbassadorId);
 
         const stripeStatus = {
+          connectAccountId: deauthAccount.id,
           onboardingCompleted: false,
           chargesEnabled: false,
           payoutsEnabled: false,
           disabledReason: "application_deauthorized",
           currentlyDue: [],
           eventuallyDue: [],
-          pastDue: []
+          pastDue: [],
+          stripeOnboardingUrl: null,
         };
 
         updateDoc(ambassadorRef, { stripe: stripeStatus })
@@ -197,13 +210,13 @@ app.post("/webhook", bodyParser.raw({ type: "application/json" }), (req, res) =>
       }
       break;
 
-
     default:
-      console.log(`Unhandled event type ${event.type}`);
+      console.log(`ℹ️ Unhandled event type ${event.type}`);
   }
 
   res.json({ received: true });
 });
+
 
 // ------------------- Start Server -------------------
 const PORT = process.env.PORT || 5000;
