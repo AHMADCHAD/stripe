@@ -94,8 +94,8 @@ app.post("/onboarding-link", async (req, res) => {
     // ✅ Generate onboarding link
     const accountLink = await stripe.accountLinks.create({
       account: connectAccountId,
-      // refresh_url: "http://localhost:5000/reauth",  // 🔧 update in production
-      // return_url: "http://localhost:5000/success",  // 🔧 update in production
+      refresh_url: "http://localhost:5000/reauth",  // 🔧 update in production
+      return_url: "http://localhost:5000/success",  // 🔧 update in production
       type: "account_onboarding",
     });
 
