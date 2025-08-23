@@ -133,6 +133,13 @@ app.post("/onboarding-link", async (req, res) => {
   }
 });
 
+app.get("/success", (req, res) => {
+  res.send("🎉 Onboarding completed successfully!");
+});
+
+app.get("/reauth", (req, res) => {
+  res.send("⚠️ Onboarding interrupted, please try again.");
+});
 
 // Use raw body parser for Stripe webhooks
 app.post("/webhook", bodyParser.raw({ type: "application/json" }), (req, res) => {
