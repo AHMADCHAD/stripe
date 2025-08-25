@@ -289,7 +289,7 @@ app.post("/approve-payout", async (req, res) => {
 
   try {
     // 1️⃣ Fetch payout request
-    const requestRef = doc(db, "payout_requests", requestId);
+    const requestRef = doc(db, "ambassador_payouts", requestId);
     const requestSnap = await getDoc(requestRef);
 
     if (!requestSnap.exists()) {
