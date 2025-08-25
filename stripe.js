@@ -334,11 +334,16 @@ app.post("/approve-payout", async (req, res) => {
       transferId: transfer.id,
     });
 
-    // 7️⃣ Respond
+    // 6️⃣ Prepare nice response
+    const formattedAmount = payoutAmount.toFixed(2); // e.g. 14.00
+    const ambassadorName = `${ambassador.firstName || ""} ${ambassador.lastName || ""}`.trim();
+
     res.json({
-      message: `Paid $${payoutAmount} to ambassador ${request.ambassadorId}`,
-      transferId: transfer.id,
+      status: "success",
+      message: `🎉 Congratulations ${ambassadorName || "Ambassador"}! You’ve been paid $${formattedAmount}.`,
+      amount: formattedAmount,
     });
+
 
   } catch (err) {
     console.error("🔥 Error approving payout:", err);
