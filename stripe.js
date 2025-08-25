@@ -10,7 +10,15 @@ dotenv.config();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY); // ✅ Read from env
 
 const app = express();
-app.use(express.json());
+// 👇 Put JSON parser BEFORE routes, but exclude /webhook
+app.use((req, res, next) => {
+  if (req.originalUrl === "/webhook") {
+    next();
+  } else {
+    express.json()(req, res, next);
+  }
+});
+
 
 // ------------------- Test Endpoint -------------------
 // ------------------- Test Endpoint -------------------
@@ -18,7 +26,8 @@ app.get("/hello", (req, res) => {
   console.log("Stripe key:", process.env.STRIPE_SECRET_KEY);
   res.json({
     message: "Hello! The server is running with full potential 🚀",
-    stripeKey: process.env.STRIPE_SECRET_KEY // ⚠️ remove if you don’t want to expose your secret key
+    stripeKey: process.env.STRIPE_SECRET_KEY, // ⚠️ remove if you don’t want to expose your secret key
+    webhookKey: process.env.STRIPE_WEBHOOK_SECRET
   });
 });
 
