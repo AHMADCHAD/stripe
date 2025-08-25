@@ -252,7 +252,7 @@ app.post("/request-payout", async (req, res) => {
       return res.status(400).json({ error: "Connected account ID mismatch" });
     }
 
-    const balance = ambassador?.referral_balance || 0;
+    const balance = ambassador?.commissionEarned || 0;
     if (balance <= 0) {
       return res.status(400).json({ error: "No referral balance available" });
     }
@@ -313,7 +313,7 @@ app.post("/approve-payout", async (req, res) => {
     const ambassador = ambassadorSnap.data();
 
     // 3️⃣ Calculate payout (10% of referral_balance)
-    const payoutAmount = ambassador.referral_balance * 0.10;
+    const payoutAmount = ambassador.commissionEarned * 0.10;
     if (payoutAmount <= 0) {
       return res.status(400).json({ error: "No balance available for payout" });
     }
@@ -332,11 +332,6 @@ app.post("/approve-payout", async (req, res) => {
       status: "approved",
       approvedAt: serverTimestamp(),
       transferId: transfer.id,
-    });
-
-    // 6️⃣ Reset ambassador referral balance
-    await updateDoc(ambassadorRef, {
-      referral_balance: 0,
     });
 
     // 7️⃣ Respond
