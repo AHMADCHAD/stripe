@@ -3,7 +3,7 @@ import Stripe from "stripe";
 import bodyParser from "body-parser";
 // Firebase
 import { db } from "./firebase.js";
-import { doc, getDoc, updateDoc } from "firebase/firestore";
+import { doc, getDoc, updateDoc, collection, addDoc, serverTimestamp } from "firebase/firestore";
 import dotenv from 'dotenv';
 dotenv.config();
 
@@ -19,8 +19,6 @@ app.use((req, res, next) => {
   }
 });
 
-
-// ------------------- Test Endpoint -------------------
 // ------------------- Test Endpoint -------------------
 app.get("/hello", (req, res) => {
   console.log("Stripe key:", process.env.STRIPE_SECRET_KEY);
@@ -89,8 +87,6 @@ app.post("/create-connectId", async (req, res) => {
   }
 });
 
-
-// ------------------- 2️⃣ Generate Onboarding Link -------------------
 // ------------------- 2️⃣ Generate Onboarding Link -------------------
 app.post("/onboarding-link", async (req, res) => {
   const { userId, connectAccountId } = req.body;
@@ -231,6 +227,166 @@ app.post("/webhook", bodyParser.raw({ type: "application/json" }), (req, res) =>
   }
 
   res.json({ received: true });
+});
+
+app.post("/request-payout", async (req, res) => {
+  const { ambassadorId, connectedAccountId } = req.body;
+
+  if (!ambassadorId || !connectedAccountId) {
+    return res.status(400).json({ error: "ambassadorId and connectedAccountId are required" });
+  }
+
+  try {
+    // 1️⃣ Fetch ambassador from Firestore
+    const ambassadorRef = doc(db, "ambassadors", ambassadorId);
+    const ambassadorSnap = await getDoc(ambassadorRef);
+
+    if (!ambassadorSnap.exists()) {
+      return res.status(404).json({ error: "Ambassador not found" });
+    }
+
+    const ambassador = ambassadorSnap.data();
+
+    // 2️⃣ Validate account ID and balance
+    if (ambassador?.stripe?.connectAccountId !== connectedAccountId) {
+      return res.status(400).json({ error: "Connected account ID mismatch" });
+    }
+
+    const balance = ambassador?.referral_balance || 0;
+    if (balance <= 0) {
+      return res.status(400).json({ error: "No referral balance available" });
+    }
+
+    // 3️⃣ Create payout request in Firestore (Firestore auto-generates ID)
+    const payoutRef = collection(db, "ambassador_payouts"); // or subcollection under ambassador
+    const newRequest = await addDoc(payoutRef, {
+      ambassadorId,
+      connectedAccountId,
+      amount: balance,
+      status: "pending", // can later update to "approved", "paid", etc.
+      createdAt: serverTimestamp(),
+    });
+
+    // 4️⃣ Respond
+    res.json({
+      message: "Payout request submitted",
+      requestId: newRequest.id, // Firestore’s auto ID
+      amount: balance,
+    });
+
+  } catch (err) {
+    console.error("🔥 Error in /request-payout:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.post("/approve-payout", async (req, res) => {
+  const { requestId } = req.body;
+
+  if (!requestId) {
+    return res.status(400).json({ error: "requestId is required" });
+  }
+
+  try {
+    // 1️⃣ Fetch payout request
+    const requestRef = doc(db, "payout_requests", requestId);
+    const requestSnap = await getDoc(requestRef);
+
+    if (!requestSnap.exists()) {
+      return res.status(404).json({ error: "Request not found" });
+    }
+
+    const request = requestSnap.data();
+
+    if (request.status !== "pending") {
+      return res.status(400).json({ error: "Request already processed" });
+    }
+
+    // 2️⃣ Fetch ambassador
+    const ambassadorRef = doc(db, "ambassadors", request.ambassadorId);
+    const ambassadorSnap = await getDoc(ambassadorRef);
+
+    if (!ambassadorSnap.exists()) {
+      return res.status(404).json({ error: "Ambassador not found" });
+    }
+
+    const ambassador = ambassadorSnap.data();
+
+    // 3️⃣ Calculate payout (10% of referral_balance)
+    const payoutAmount = ambassador.referral_balance * 0.10;
+    if (payoutAmount <= 0) {
+      return res.status(400).json({ error: "No balance available for payout" });
+    }
+
+    const amountInCents = Math.round(payoutAmount * 100);
+
+    // 4️⃣ Send payment via Stripe
+    const transfer = await stripe.transfers.create({
+      amount: amountInCents,
+      currency: "usd",
+      destination: request.connectedAccountId,
+    });
+
+    // 5️⃣ Update payout request
+    await updateDoc(requestRef, {
+      status: "approved",
+      approvedAt: serverTimestamp(),
+      transferId: transfer.id,
+    });
+
+    // 6️⃣ Reset ambassador referral balance
+    await updateDoc(ambassadorRef, {
+      referral_balance: 0,
+    });
+
+    // 7️⃣ Respond
+    res.json({
+      message: `Paid $${payoutAmount} to ambassador ${request.ambassadorId}`,
+      transferId: transfer.id,
+    });
+
+  } catch (err) {
+    console.error("🔥 Error approving payout:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/cancel-payout", async (req, res) => {
+  const { requestId } = req.body;
+
+  if (!requestId) {
+    return res.status(400).json({ error: "requestId is required" });
+  }
+
+  try {
+    // 1️⃣ Fetch payout request
+    const requestRef = doc(db, "payout_requests", requestId);
+    const requestSnap = await getDoc(requestRef);
+
+    if (!requestSnap.exists()) {
+      return res.status(404).json({ error: "Request not found" });
+    }
+
+    const request = requestSnap.data();
+
+    // 2️⃣ Ensure request is still pending
+    if (request.status !== "pending") {
+      return res.status(400).json({ error: "Request already processed" });
+    }
+
+    // 3️⃣ Mark as cancelled
+    await updateDoc(requestRef, {
+      status: "cancelled",
+      cancelledAt: serverTimestamp(),
+    });
+
+    // 4️⃣ Respond
+    res.json({ message: "Payout request cancelled" });
+
+  } catch (err) {
+    console.error("🔥 Error cancelling payout:", err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 
