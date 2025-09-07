@@ -857,15 +857,15 @@ app.post("/api/onboardingLink", async (req, res) => {
   }
 });
 
-app.get("/api/success", (req, res) => {
+app.get("/success", (req, res) => {
   res.send("🎉 Onboarding completed successfully!");
 });
 
-app.get("/api/reauth", (req, res) => {
+app.get("/reauth", (req, res) => {
   res.send("⚠️ Onboarding interrupted, please try again.");
 });
 
-app.post("/api/webhook", bodyParser.raw({ type: "application/json" }), async (req, res) => {
+app.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req, res) => {
   console.log('📩 Webhook called');
   const sig = req.headers["stripe-signature"];
 
