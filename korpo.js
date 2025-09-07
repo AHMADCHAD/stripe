@@ -1141,7 +1141,7 @@ app.post("/api/requestPayoutForPartner", async (req, res) => {
       return res.status(400).json({ error: "Connected account ID mismatch" });
     }
 
-    const balance = partner?.commissionEarned || 0; // Adjust field name if different
+    const balance = partner?.totalPartnerRevenue || 0; // Adjust field name if different
     if (balance <= 0) {
       return res.status(400).json({ error: "No referral balance available" });
     }
@@ -1202,7 +1202,7 @@ app.post("/api/approvePayoutForPartner", async (req, res) => {
     const partner = partnerSnap.data();
 
     // 3️⃣ Calculate payout (10% of referral_balance)
-    const payoutAmount = partner.commissionEarned * 0.10; // Adjust field if necessary
+    const payoutAmount = partner.totalPartnerRevenue; // Adjust field if necessary
     if (payoutAmount <= 0) {
       return res.status(400).json({ error: "No balance available for payout" });
     }
