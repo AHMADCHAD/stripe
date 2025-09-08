@@ -476,6 +476,8 @@ app.post("/api/promoCode/use/:code", async (req, res) => {
         await updateDoc(partnerRef, {
           lastUpdated: new Date(),
           totalPartnerRevenue: increment(partnerRevenue),
+          availableBalance: increment(partnerRevenue),
+          totalDiscountGiven: increment(discountAmount),
           timesUsed,
           leftPromo,
           totalPromo: usageLimit > 0 ? usageLimit : null,
@@ -722,6 +724,62 @@ app.get("/api/partner/monthlyStats/:partnerId", async (req, res) => {
   } catch (error) {
     console.error("🔥 Error fetching monthly status:", error.message);
     res.status(500).json({ error: error.message });
+  }
+});
+
+
+// _________________________AMBASSADOR ROUTES_________________________
+// ✅ Update Ambassador Application Status
+app.post("/api/ambassador/updateStatus", async (req, res) => {
+  try {
+    const { appData, newStatus } = req.body; // appData is your application object
+
+    if (!appData?.id || !appData?.userId) {
+      return res.status(400).json({ error: "Missing application ID or userId" });
+    }
+
+    // 1️⃣ Update status in ambassadorApplications
+    const appRef = doc(db, "ambassadorApplications", appData.id);
+    await updateDoc(appRef, {
+      status: newStatus,
+      updatedAt: new Date(),
+    });
+
+    // 2️⃣ If approved, add/update ambassadors collection
+    if (newStatus === "approved") {
+      const ambassadorsRef = doc(db, "ambassadors", appData.userId);
+      const { id, updatedAt, createdAt, ...rest } = appData;
+      await setDoc(ambassadorsRef, {
+        ...rest,
+        status: newStatus,
+        ambassadorSince: new Date(),
+        comissionRate: 0.1,
+        totalReferrals: 0,
+        commissionEarned: 0,
+        referralBalance: 0,
+      });
+    }
+
+    // 3️⃣ Update status in user document if exists
+    const userRef = doc(db, "users", appData.userId);
+    const userSnap = await getDoc(userRef);
+
+    if (!userSnap.exists()) {
+      return res.status(400).json({ error: "User document does not exist!" });
+    }
+
+    await updateDoc(userRef, {
+      ambassadorApplicationStatus: newStatus,
+      isAmbassador: newStatus === "approved" ? true : false,
+    });
+
+    res.status(200).json({
+      message: "Ambassador application status updated successfully",
+      status: newStatus,
+    });
+  } catch (error) {
+    console.error("Error updating ambassador status:", error);
+    res.status(500).json({ error: "Failed to update ambassador status" });
   }
 });
 
