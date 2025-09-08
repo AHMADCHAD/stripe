@@ -247,7 +247,7 @@ app.post("/api/verifyUser", async (req, res) => {
     }
     // :white_check_mark: 2. If not used → fetch promo details
     const promoQuery = query(
-      collection(db, "partnerPromoCodes"),
+      collection(db, "promoCodes"),
       where("code", "==", promoCode)
     );
     const promoSnap = await getDocs(promoQuery);
@@ -296,7 +296,7 @@ app.post("/api/partner/:partnerId/approve", async (req, res) => {
       createdAt: serverTimestamp(),
     };
 
-    const promoRef = await addDoc(collection(db, "partnerPromoCodes"), promoData);
+    const promoRef = await addDoc(collection(db, "promoCodes"), promoData);
 
     // ✅ Step 3: Update partner document with status + promo info
     await updateDoc(partnerRef, {
@@ -304,7 +304,7 @@ app.post("/api/partner/:partnerId/approve", async (req, res) => {
       promoId: promoRef.id,
       promoCode: promoData.code,
       discountPercentage: promoData.discountPercentage,
-      validTo: promoData.validTo,
+      promoCodeValidTo: promoData.validTo,
     });
 
     // ✅ Step 4: Update related user document
@@ -331,7 +331,7 @@ app.post("/api/partner/:partnerId/approve", async (req, res) => {
 // Get All Promo Codes
 app.get("/api/promoCodes", async (req, res) => {
   try {
-    const snapshot = await getDocs(collection(db, "partnerPromoCodes"));
+    const snapshot = await getDocs(collection(db, "promoCodes"));
     const promoCodes = snapshot.docs.map(docSnap => ({
       id: docSnap.id,
       ...docSnap.data(),
@@ -345,7 +345,7 @@ app.get("/api/promoCodes", async (req, res) => {
 // Validate Promo Code
 app.get("/api/promoCode/validate/:code", async (req, res) => {
   try {
-    const snapshot = await getDocs(collection(db, "partnerPromoCodes"));
+    const snapshot = await getDocs(collection(db, "promoCodes"));
     const promo = snapshot.docs
       .map(docSnap => ({ firestoreId: docSnap.id, ...docSnap.data() }))
       .find(p => p.code === req.params.code);
@@ -370,7 +370,7 @@ app.get("/api/promoCode/validate/:code", async (req, res) => {
 // Delete Promo Code
 app.delete("/api/promoCode/:id", async (req, res) => {
   try {
-    const promoRef = doc(db, "partnerPromoCodes", req.params.id);
+    const promoRef = doc(db, "promoCodes", req.params.id);
     await deleteDoc(promoRef);
     res.json({ message: "Promo code deleted successfully" });
   } catch (error) {
@@ -397,7 +397,7 @@ app.post("/api/promoCode/use/:code", async (req, res) => {
 
     // ✅ 2. Find promo code
     const promoQuery = query(
-      collection(db, "partnerPromoCodes"),
+      collection(db, "promoCodes"),
       where("code", "==", req.params.code)
     );
 
@@ -577,7 +577,7 @@ app.get("/api/revenue/:partnerId", async (req, res) => {
 
     // ✅ Fetch latest promo code details for this partner
     const promoQuery = query(
-      collection(db, "partnerPromoCodes"),
+      collection(db, "promoCodes"),
       where("partnerId", "==", partnerId)
     );
     const promoSnap = await getDocs(promoQuery);
@@ -619,7 +619,6 @@ app.get("/api/revenue/:partnerId", async (req, res) => {
   }
 });
 
-
 // :white_check_mark: Monthly Status API
 app.get("/api/partner/monthlyStats/:partnerId", async (req, res) => {
   try {
@@ -630,7 +629,7 @@ app.get("/api/partner/monthlyStats/:partnerId", async (req, res) => {
 
     // 1️⃣ Fetch all promo codes for this partner
     const promoQuery = query(
-      collection(db, "partnerPromoCodes"),
+      collection(db, "promoCodes"),
       where("partnerId", "==", partnerId)
     );
     const promoSnap = await getDocs(promoQuery);
@@ -727,62 +726,538 @@ app.get("/api/partner/monthlyStats/:partnerId", async (req, res) => {
   }
 });
 
-
 // _________________________AMBASSADOR ROUTES_________________________
-// ✅ Update Ambassador Application Status
-app.post("/api/ambassador/updateStatus", async (req, res) => {
+
+// ✅ Submit Ambassador Application 
+app.post("/api/ambassador/submitApplication", async (req, res) => {
+  console.log("📩 Incoming ambassador application:", req.body);
+
   try {
-    const { appData, newStatus } = req.body; // appData is your application object
+    const { userId, firstName, lastName, email, socialLinks, whyJoin, referralCode } = req.body;
 
-    if (!appData?.id || !appData?.userId) {
-      return res.status(400).json({ error: "Missing application ID or userId" });
-    }
-
-    // 1️⃣ Update status in ambassadorApplications
-    const appRef = doc(db, "ambassadorApplications", appData.id);
-    await updateDoc(appRef, {
-      status: newStatus,
-      updatedAt: new Date(),
-    });
-
-    // 2️⃣ If approved, add/update ambassadors collection
-    if (newStatus === "approved") {
-      const ambassadorsRef = doc(db, "ambassadors", appData.userId);
-      const { id, updatedAt, createdAt, ...rest } = appData;
-      await setDoc(ambassadorsRef, {
-        ...rest,
-        status: newStatus,
-        ambassadorSince: new Date(),
-        comissionRate: 0.1,
-        totalReferrals: 0,
-        commissionEarned: 0,
-        referralBalance: 0,
+    // 1️⃣ Validate required fields
+    if (!userId || !firstName || !lastName || !email || !whyJoin) {
+      return res.status(400).json({
+        success: false,
+        error: "Missing required fields. Please complete all fields before submitting.",
       });
     }
 
-    // 3️⃣ Update status in user document if exists
-    const userRef = doc(db, "users", appData.userId);
-    const userSnap = await getDoc(userRef);
+    // 2️⃣ Check if ambassador profile already exists
+    const ambassadorRef = doc(db, "ambassadors", userId);
+    const ambassadorSnap = await getDoc(ambassadorRef);
 
-    if (!userSnap.exists()) {
-      return res.status(400).json({ error: "User document does not exist!" });
+    if (ambassadorSnap.exists()) {
+      const existing = ambassadorSnap.data();
+      if (existing.status === "pending" || existing.status === "approved") {
+        return res.status(400).json({
+          success: false,
+          error: "You already have a pending or approved ambassador profile.",
+        });
+      }
     }
 
+    // 3️⃣ Generate unique referral code
+    let finalCode = referralCode || "";
+    let isUnique = false;
+
+    while (!isUnique) {
+      if (!finalCode) finalCode = `AMB${userId.slice(-4).toUpperCase()}`;
+
+      const q = query(collection(db, "referralCodes"), where("referralCode", "==", finalCode));
+      const existing = await getDocs(q);
+
+      if (existing.empty) {
+        isUnique = true;
+      } else {
+        if (referralCode) {
+          return res.status(400).json({
+            success: false,
+            error: "Referral code already exists. Please choose another one.",
+          });
+        }
+        finalCode = ""; // regenerate until unique
+      }
+    }
+
+    // 4️⃣ Create referral code record
+    const referralData = {
+      ambassadorId: userId,
+      referralCode: finalCode,
+      status: "pending",
+      validFrom: null,
+      validTo: null,
+      usageLimit: 100,
+      timesUsed: 0,
+      createdAt: serverTimestamp(),
+    };
+    const referralRef = await addDoc(collection(db, "referralCodes"), referralData);
+
+    // 5️⃣ Create or update ambassador profile directly
+    const ambassadorData = {
+      userId,
+      firstName,
+      lastName,
+      email,
+      socialLinks: socialLinks || {},
+      whyJoin,
+      status: "pending",
+      referralCode: finalCode,
+      referralCodeId: referralRef.id,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+      commissionRate: 0.1,
+      totalReferrals: 0,
+      commissionEarned: 0,
+      availableBalance: 0,
+    };
+
+    await setDoc(ambassadorRef, ambassadorData, { merge: true });
+
+    // 6️⃣ Update user document with ambassador info
+    const userRef = doc(db, "users", userId);
     await updateDoc(userRef, {
-      ambassadorApplicationStatus: newStatus,
-      isAmbassador: newStatus === "approved" ? true : false,
+      ambassadorApplication: {
+        status: "pending",
+        createdAt: new Date(),
+        ambassadorId: userId,
+      },
+      hasAppliedForAmbassador: true,
     });
 
-    res.status(200).json({
-      message: "Ambassador application status updated successfully",
-      status: newStatus,
+    // 7️⃣ Send response back
+    return res.status(201).json({
+      success: true,
+      message: "Your application has been submitted successfully!",
+      ambassador: { id: userId, ...ambassadorData },
+      referral: { id: referralRef.id, ...referralData },
     });
+
   } catch (error) {
-    console.error("Error updating ambassador status:", error);
-    res.status(500).json({ error: "Failed to update ambassador status" });
+    console.error("🔥 Error submitting ambassador application:", error);
+    return res.status(500).json({
+      success: false,
+      error: "Something went wrong while submitting your application. Please try again later.",
+    });
   }
 });
 
+// ✅ Update Ambassador Application Status (Approve / Decline / etc.)
+app.post("/api/ambassador/updateApplicationStatus", async (req, res) => {
+  console.log("📩 Update Ambassador Application Request:", req.body);
+
+  try {
+    const { userId, newStatus } = req.body;
+
+    if (!userId || !newStatus) {
+      return res.status(400).json({ success: false, error: "Missing user ID or status" });
+    }
+
+    // 1️⃣ Fetch ambassador profile
+    const ambassadorsRef = doc(db, "ambassadors", userId);
+    const ambassadorSnap = await getDoc(ambassadorsRef);
+    if (!ambassadorSnap.exists()) {
+      return res.status(404).json({ success: false, error: "Ambassador profile not found." });
+    }
+
+    const ambassadorData = ambassadorSnap.data();
+
+    // 2️⃣ Get referral code (if exists)
+    const q = query(collection(db, "referralCodes"), where("ambassadorId", "==", userId));
+    const referralSnap = await getDocs(q);
+
+    let updatedReferralCode = null;
+    let updatedReferralId = null;
+    const validFrom = new Date();
+    const validTo = new Date(validFrom);
+    validTo.setDate(validTo.getDate() + 100);
+
+    if (!referralSnap.empty) {
+      // Use existing referral code
+      const referralDoc = referralSnap.docs[0];
+      const referralRef = doc(db, "referralCodes", referralDoc.id);
+      const referralData = referralDoc.data();
+
+      updatedReferralCode = referralData.referralCode;
+      updatedReferralId = referralDoc.id;
+
+      if (newStatus === "approved") {
+        let finalValidFrom = referralData.validFrom;
+        let finalValidTo = referralData.validTo;
+
+        // ✅ Only set validFrom/validTo if they are missing or expired
+        const now = new Date();
+        if (!finalValidFrom || !finalValidTo || new Date(finalValidTo) < now) {
+          finalValidFrom = now;
+          finalValidTo = new Date(now);
+          finalValidTo.setDate(finalValidTo.getDate() + 100);
+        }
+
+        await updateDoc(referralRef, {
+          status: "active",
+          validFrom: finalValidFrom,
+          validTo: finalValidTo,
+        });
+
+      } else if (newStatus === "declined") {
+        // ❌ Deactivate but keep validity range intact
+        await updateDoc(referralRef, { status: "inactive" });
+      }
+    }
+
+    // 3️⃣ Update ambassador profile
+    if (newStatus === "approved") {
+      await updateDoc(ambassadorsRef, {
+        status: "approved",
+        ambassadorSince: ambassadorData.ambassadorSince || new Date(),
+        updatedAt: new Date(),
+        ...(updatedReferralCode && {
+          referralCode: updatedReferralCode,
+          referralCodeId: updatedReferralId,
+          referralCodeValidTo: validTo,
+        }),
+      });
+    } else if (newStatus === "declined") {
+      await updateDoc(ambassadorsRef, {
+        status: "declined",
+        updatedAt: new Date(),
+        referralCode: updatedReferralCode || null,
+        referralCodeId: updatedReferralId || null,
+      });
+    } else {
+      await updateDoc(ambassadorsRef, { status: newStatus, updatedAt: new Date() });
+    }
+
+    // 4️⃣ Update user document
+    const userRef = doc(db, "users", userId);
+    const userSnap = await getDoc(userRef);
+    if (!userSnap.exists()) return res.status(404).json({ success: false, error: "User not found." });
+
+    const userData = userSnap.data();
+    await updateDoc(userRef, {
+      isAmbassador: newStatus === "approved",
+      ambassadorApplication: {
+        ...(userData.ambassadorApplication || {}),
+        status: newStatus,
+        updatedAt: new Date(),
+      },
+    });
+
+    // 5️⃣ Respond
+    return res.status(200).json({
+      success: true,
+      message:
+        newStatus === "approved"
+          ? `✅ Application approved. Referral code ${updatedReferralCode || "(none)"} activated.`
+          : newStatus === "declined"
+            ? "❌ Application declined. Referral code deactivated."
+            : `ℹ️ Ambassador status updated to ${newStatus}`,
+      referralCode: updatedReferralCode,
+      referralCodeId: updatedReferralId,
+    });
+
+  } catch (error) {
+    console.error("🔥 Error updating ambassador application:", error);
+    return res.status(500).json({
+      success: false,
+      error: "Something went wrong while updating the ambassador status.",
+      details: error.message,
+    });
+  }
+});
+
+// ✅ Use Referral Code
+app.post("/api/referralCode/use/:code", async (req, res) => {
+  try {
+    const { userId, amount } = req.body; // 📝 userId & optional amount
+
+    if (!userId) {
+      return res.status(400).json({ error: "userId is required" });
+    }
+
+    // 1️⃣ Check if user exists
+    const userRef = doc(db, "users", userId);
+    const userSnap = await getDoc(userRef);
+    if (!userSnap.exists()) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    // 2️⃣ Find referral code
+    const referralQuery = query(
+      collection(db, "referralCodes"),
+      where("referralCode", "==", req.params.code)
+    );
+    const referralSnap = await getDocs(referralQuery);
+    if (referralSnap.empty) {
+      return res.status(404).json({ error: "Referral code not found" });
+    }
+
+    const referralDoc = referralSnap.docs[0];
+    const referralRef = referralDoc.ref;
+    const referralData = referralDoc.data();
+
+    // 3️⃣ Validate referral code status & validity dates
+    const now = new Date();
+    if (referralData.status !== "active") {
+      return res.status(400).json({ error: "Referral code is not active" });
+    }
+    if (referralData.validFrom && new Date(referralData.validFrom) > now) {
+      return res.status(400).json({ error: "Referral code is not valid yet" });
+    }
+    if (referralData.validTo && new Date(referralData.validTo) < now) {
+      return res.status(400).json({ error: "Referral code has expired" });
+    }
+
+    // 4️⃣ Check usage limit
+    const timesUsed = referralData.timesUsed || 0;
+    if (
+      referralData.usageLimit !== null &&
+      referralData.usageLimit !== undefined &&
+      timesUsed >= referralData.usageLimit
+    ) {
+      return res.status(400).json({ error: "Referral code usage limit reached" });
+    }
+
+    const ambassadorId = referralData.ambassadorId;
+
+    // 5️⃣ Prevent duplicate usage by same user
+    const prevUsageQuery = query(
+      collection(db, "referralTracking"),
+      where("userId", "==", userId),
+      where("referralCode", "==", req.params.code)
+    );
+    const prevUsageSnap = await getDocs(prevUsageQuery);
+    if (!prevUsageSnap.empty) {
+      return res.status(400).json({ error: "User already used this referral code" });
+    }
+
+    // 6️⃣ Find ambassador (for revenue share & tracking)
+    let ambassadorData = null;
+    let ambassadorRef = null;
+    if (ambassadorId) {
+      ambassadorRef = doc(db, "ambassadors", ambassadorId);
+      const ambassadorSnap = await getDoc(ambassadorRef);
+      if (ambassadorSnap.exists()) {
+        ambassadorData = ambassadorSnap.data();
+      }
+    }
+
+    // 7️⃣ Calculate commission
+    const commissionRate = ambassadorData?.commissionRate ?? 0.1; // default 10%
+    const commissionEarned = amount ? amount * commissionRate : 0;
+
+    // 8️⃣ Increment timesUsed in referral code
+    await updateDoc(referralRef, { timesUsed: increment(1) });
+
+    // 9️⃣ Log usage in referralTracking
+    const trackingData = {
+      userId,
+      ambassadorId: ambassadorId || null,
+      referralCode: req.params.code,
+      referralId: referralDoc.id,
+      usedAt: now,
+      amount: amount ?? null,
+      commissionRate,
+      commissionEarned,
+    };
+    await addDoc(collection(db, "referralTracking"), trackingData);
+
+    // 🔟 Update ambassador profile stats
+    if (ambassadorRef) {
+      await updateDoc(ambassadorRef, {
+        totalReferrals: increment(1),
+        totalAmbassadorRevenue: increment(commissionEarned), // all-time revenue
+        availableBalance: increment(commissionEarned), // can withdraw later
+        ...(amount && {
+          commissionEarned: increment(commissionEarned), // running commission
+        }),
+        lastReferralUsedAt: now,
+      });
+    }
+
+    // 🔟 Respond back
+    return res.json({
+      message: `Referral code ${req.params.code} used successfully ✅`,
+      ambassadorId,
+      commissionEarned,
+      commissionRate,
+      timesUsed: timesUsed + 1,
+      usageLimit: referralData.usageLimit ?? null,
+    });
+
+  } catch (error) {
+    console.error("🔥 Error using referral code:", error.message);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+// ✅ Get overall Ambassador Stats (all-time)
+app.get("/api/ambassador/stats/:ambassadorId", async (req, res) => {
+  try {
+    const { ambassadorId } = req.params;
+
+    if (!ambassadorId) {
+      return res.status(400).json({ error: "ambassadorId is required" });
+    }
+
+    // 1️⃣ Fetch ambassador profile
+    const ambassadorRef = doc(db, "ambassadors", ambassadorId);
+    const ambassadorSnap = await getDoc(ambassadorRef);
+    if (!ambassadorSnap.exists()) {
+      return res.status(404).json({ error: "Ambassador not found" });
+    }
+    const ambassadorData = ambassadorSnap.data();
+
+    // 2️⃣ Fetch all referral tracking entries for this ambassador
+    const trackingQuery = query(
+      collection(db, "referralTracking"),
+      where("ambassadorId", "==", ambassadorId)
+    );
+    const trackingSnap = await getDocs(trackingQuery);
+
+    const uniqueUsers = new Set();
+    if (!trackingSnap.empty) {
+      trackingSnap.forEach((doc) => {
+        const data = doc.data();
+        if (data.userId) uniqueUsers.add(data.userId);
+      });
+    }
+
+    // 3️⃣ Fetch referral code info
+    const referralQuery = query(
+      collection(db, "referralCodes"),
+      where("ambassadorId", "==", ambassadorId)
+    );
+    const referralSnap = await getDocs(referralQuery);
+
+    let referralDetails = {};
+    if (!referralSnap.empty) {
+      const referralDoc = referralSnap.docs[0];
+      const data = referralDoc.data();
+
+      // Calculate remaining usage & validity dynamically
+      const now = new Date();
+      const validFrom = data.validFrom ? new Date(data.validFrom) : null;
+      const validTo = data.validTo ? new Date(data.validTo) : null;
+      const daysRemaining = validTo ? Math.max(0, Math.ceil((validTo - now) / (1000 * 60 * 60 * 24))) : null;
+
+      let leftUses = null;
+      if (data.usageLimit !== null && data.usageLimit !== undefined) {
+        leftUses = Math.max(0, data.usageLimit - (data.timesUsed || 0));
+      }
+
+      referralDetails = {
+        referralCode: data.referralCode,
+        status: data.status,
+        usageLimit: data.usageLimit ?? null,
+        timesUsed: data.timesUsed || 0,
+        leftUses,
+        validFrom,
+        validTo,
+        daysRemaining,
+        isExpired: validTo ? validTo < now : false,
+        isActive: data.status === "active",
+      };
+    }
+
+    // 4️⃣ Respond with stats
+    res.json({
+      ambassadorId,
+      ambassadorSince: ambassadorData.ambassadorSince || null,
+      commissionRate: ambassadorData.commissionRate ?? 0.1,
+      totalAmbassadorRevenue: ambassadorData.totalAmbassadorRevenue || 0, // ✅ All-time revenue
+      availableBalance: ambassadorData.availableBalance || 0, // ✅ Withdrawable balance
+      lastReferralUsedAt: ambassadorData.lastReferralUsedAt || null,
+      totalReferrals: uniqueUsers.size,
+      referralDetails,
+    });
+
+  } catch (error) {
+    console.error("🔥 Error fetching ambassador stats:", error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ✅ Get Monthly Ambassador Stats (current month only)
+app.get("/api/ambassador/stats/monthly/:ambassadorId", async (req, res) => {
+  try {
+    const { ambassadorId } = req.params;
+
+    if (!ambassadorId) {
+      return res.status(400).json({ error: "ambassadorId is required" });
+    }
+
+    // 1️⃣ Calculate date range for current month
+    const now = new Date();
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const startOfNextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+
+    // 2️⃣ Fetch referral tracking entries for this ambassador in current month
+    const trackingQuery = query(
+      collection(db, "referralTracking"),
+      where("ambassadorId", "==", ambassadorId),
+      where("usedAt", ">=", startOfMonth),
+      where("usedAt", "<", startOfNextMonth)
+    );
+
+    const trackingSnap = await getDocs(trackingQuery);
+
+    let monthlyRevenue = 0;
+    let monthlyReferrals = 0;
+    const uniqueUsers = new Set();
+
+    if (!trackingSnap.empty) {
+      trackingSnap.forEach((doc) => {
+        const data = doc.data();
+        monthlyRevenue += data.commissionEarned || 0;
+        monthlyReferrals++;
+        if (data.userId) uniqueUsers.add(data.userId);
+      });
+    }
+
+    // 3️⃣ Fetch ambassador profile (for commissionRate and balances)
+    const ambassadorRef = doc(db, "ambassadors", ambassadorId);
+    const ambassadorSnap = await getDoc(ambassadorRef);
+    if (!ambassadorSnap.exists()) {
+      return res.status(404).json({ error: "Ambassador not found" });
+    }
+    const ambassadorData = ambassadorSnap.data();
+
+    // 4️⃣ Fetch referral code details (optional for UI)
+    const referralQuery = query(
+      collection(db, "referralCodes"),
+      where("ambassadorId", "==", ambassadorId)
+    );
+    const referralSnap = await getDocs(referralQuery);
+
+    let referralDetails = {};
+    if (!referralSnap.empty) {
+      const referralDoc = referralSnap.docs[0];
+      const data = referralDoc.data();
+
+      referralDetails = {
+        referralCode: data.referralCode,
+        status: data.status,
+        timesUsed: data.timesUsed || 0,
+      };
+    }
+
+    // 5️⃣ Respond
+    res.json({
+      ambassadorId,
+      month: now.toLocaleString("default", { month: "long", year: "numeric" }),
+      commissionRate: ambassadorData.commissionRate ?? 0.1,
+      monthlyRevenue,
+      monthlyReferrals,
+      uniqueMonthlyUsers: uniqueUsers.size,
+      referralDetails,
+    });
+
+  } catch (error) {
+    console.error("🔥 Error fetching monthly stats:", error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // -------------------------STRIPE CONNECT ROUTES-------------------------
 
@@ -1016,7 +1491,7 @@ app.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req, r
   res.json({ received: true });
 });
 
-app.post("/api/requestPayoutForAmbassador", async (req, res) => {
+app.post("/api/ambassador/requestPayout", async (req, res) => {
   const { ambassadorId, connectedAccountId } = req.body;
 
   if (!ambassadorId || !connectedAccountId) {
@@ -1067,7 +1542,7 @@ app.post("/api/requestPayoutForAmbassador", async (req, res) => {
   }
 });
 
-app.post("/api/approvePayoutForAmbassador", async (req, res) => {
+app.post("/api/ambassador/approvePayout", async (req, res) => {
   const { requestId } = req.body;
 
   if (!requestId) {
@@ -1099,8 +1574,8 @@ app.post("/api/approvePayoutForAmbassador", async (req, res) => {
 
     const ambassador = ambassadorSnap.data();
 
-    // 3️⃣ Calculate payout (10% of referral_balance)
-    const payoutAmount = ambassador.commissionEarned * 0.10;
+    // 3️⃣ Calculate payout 
+    const payoutAmount = ambassador.availableBalance;
     if (payoutAmount <= 0) {
       return res.status(400).json({ error: "No balance available for payout" });
     }
@@ -1121,8 +1596,14 @@ app.post("/api/approvePayoutForAmbassador", async (req, res) => {
       transferId: transfer.id,
     });
 
-    // 6️⃣ Prepare nice response
-    const formattedAmount = payoutAmount.toFixed(2); // e.g. 14.00
+    // 6️⃣ Deduct balance from ambassador
+    await updateDoc(ambassadorRef, {
+      availableBalance: 0, // because we just paid out everything
+      lastPayoutAt: serverTimestamp(),
+    });
+
+    // 7️⃣ Prepare nice response
+    const formattedAmount = payoutAmount.toFixed(2);
     const ambassadorName = `${ambassador.firstName || ""} ${ambassador.lastName || ""}`.trim();
 
     res.json({
@@ -1131,14 +1612,13 @@ app.post("/api/approvePayoutForAmbassador", async (req, res) => {
       amount: formattedAmount,
     });
 
-
   } catch (err) {
     console.error("🔥 Error approving payout:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
-app.post("/api/cancelPayoutForAmbassador", async (req, res) => {
+app.post("/api/ambassador/cancelPayout", async (req, res) => {
   const { requestId } = req.body;
 
   if (!requestId) {
@@ -1176,7 +1656,7 @@ app.post("/api/cancelPayoutForAmbassador", async (req, res) => {
   }
 });
 
-app.post("/api/requestPayoutForPartner", async (req, res) => {
+app.post("/api/partner/requestPayout", async (req, res) => {
   const { partnerId, connectedAccountId } = req.body;
 
   if (!partnerId || !connectedAccountId) {
@@ -1227,7 +1707,7 @@ app.post("/api/requestPayoutForPartner", async (req, res) => {
   }
 });
 
-app.post("/api/approvePayoutForPartner", async (req, res) => {
+app.post("/api/partner/approvePayout", async (req, res) => {
   const { requestId } = req.body;
 
   if (!requestId) {
@@ -1297,7 +1777,7 @@ app.post("/api/approvePayoutForPartner", async (req, res) => {
   }
 });
 
-app.post("/api/cancelPayoutForPartner", async (req, res) => {
+app.post("/api/partner/cancelPayout", async (req, res) => {
   const { requestId } = req.body;
 
   if (!requestId) {
