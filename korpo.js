@@ -43,8 +43,8 @@ app.use(cors());
 const transporter = nodemailer.createTransport({
   service: "gmail",
   auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
+    user: process.env.EMAIL_USER, // your@gmail.com
+    pass: process.env.EMAIL_PASS, // app password
   },
 });
 
@@ -96,9 +96,8 @@ app.get("/hello", (req, res) => {
 });
 
 // ------------------- Partner Endpoints -------------------
-
 // Create Partner
-app.post("/api/partner", async (req, res) => {
+app.post("/api/partner/submitApplication", async (req, res) => {
   try {
     const {
       businessName,
@@ -106,7 +105,7 @@ app.post("/api/partner", async (req, res) => {
       contactEmail,
       contactPhone,
       description,
-      discountPercentage,
+      discountRate, // comes as 30
       email,
       firstName,
       lastName,
@@ -114,29 +113,74 @@ app.post("/api/partner", async (req, res) => {
       status,
       userId,
       userRange,
+      promoCode,
       website,
       agreements,
       agreementTerms,
-      commission
+      commissionRate // comes as 10
     } = req.body;
 
     // ✅ Step 1: Check if user exists
     const userRef = doc(db, "users", userId);
     const userSnap = await getDoc(userRef);
-
     if (!userSnap.exists()) {
       return res.status(400).json({ error: "User does not exist" });
     }
 
-    // ✅ Step 2: Create Partner (without ID first)
+    // ✅ Step 2: Generate unique promo code
+    let finalCode = promoCode || "";
+    let isUnique = false;
+    let attempts = 0;
+
+    while (!isUnique && attempts < 5) {
+      if (!finalCode) finalCode = `PRM${userId.slice(-4).toUpperCase()}${Math.floor(Math.random() * 1000)}`;
+
+      const q = query(collection(db, "promoCodes"), where("promoCode", "==", finalCode));
+      const existing = await getDocs(q);
+
+      if (existing.empty) {
+        isUnique = true;
+      } else {
+        finalCode = ""; // regenerate
+      }
+
+      attempts++;
+    }
+
+    if (!isUnique) {
+      return res.status(400).json({ error: "Failed to generate unique promo code. Try again." });
+    }
+
+
+    // ✅ Step 2.5: Convert commission/discount to decimal
+    const commissionDecimal = commissionRate ? commissionRate / 100 : 0; // e.g. 10 → 0.1
+    const discountDecimal = discountRate ? discountRate / 100 : 0; // e.g. 30 → 0.3
+
+    // ✅ Step 3: Create promo code record
+    const promoData = {
+      partnerId: userId,
+      promoCode: finalCode,
+      validFrom: null,
+      validTo: null,
+      discountRate: discountDecimal,
+      usageLimit: 100,
+      status: "pending", // pending until partner approved
+      timesUsed: 0,
+      createdAt: serverTimestamp(),
+    };
+    const promoRef = await addDoc(collection(db, "promoCodes"), promoData);
+
+    // ✅ Step 4: Create Partner document
     const partnerRef = doc(db, "partners", userId);
     await setDoc(partnerRef, {
       businessName,
       businessType,
       contactEmail,
       contactPhone,
+      promoCode: finalCode,
+      promoId: promoRef.id,
       description,
-      discountPercentage,
+      discountRate: discountDecimal,   // ✅ consistent naming
       email,
       firstName,
       lastName,
@@ -145,7 +189,10 @@ app.post("/api/partner", async (req, res) => {
       userId,
       userRange,
       website,
-      commission: commission || 0,
+      totalPartnerRevenue: 0,
+      commissionRate: commissionDecimal, // ✅ stored as decimal
+      totalPromos: 0,
+      availableBalance: 0,
       agreements: agreements || "",
       agreementTerms: agreementTerms || false,
       createdAt: serverTimestamp(),
@@ -156,18 +203,24 @@ app.post("/api/partner", async (req, res) => {
       message: "Partner created successfully (awaiting admin approval)",
     });
   } catch (error) {
-    console.error("Error creating partner:", error);
+    console.error("🔥 Error creating partner:", error);
     res.status(500).json({ error: "Failed to create partner" });
   }
 });
 
-// Admin approves partner & create promo
-app.post("/api/partner/:partnerId/approve", async (req, res) => {
+
+
+
+app.post("/api/partner/:partnerId/updateApplicationStatus", async (req, res) => {
   try {
     const { partnerId } = req.params;
-    const { code, discountPercentage, validFrom, validTo, usageLimit } = req.body;
+    const { newStatus } = req.body;
 
-    // ✅ Step 1: Fetch partner directly by docId
+    if (!newStatus) {
+      return res.status(400).json({ error: "Missing newStatus" });
+    }
+
+    // 1️⃣ Fetch partner
     const partnerRef = doc(db, "partners", partnerId);
     const partnerSnap = await getDoc(partnerRef);
 
@@ -177,31 +230,70 @@ app.post("/api/partner/:partnerId/approve", async (req, res) => {
 
     const partnerData = partnerSnap.data();
     const userId = partnerData.userId;
+    const promoCode = partnerData.promoCode;
 
-    // ✅ Step 2: Create promo code
-    const promoData = {
-      partnerId,
-      code,
-      discountPercentage: discountPercentage || 0,
-      validFrom: validFrom || null,
-      validTo: validTo || null,
-      usageLimit: usageLimit || null,
-      timesUsed: 0,
-      createdAt: serverTimestamp(),
-    };
+    let promoData = null;
 
-    const promoRef = await addDoc(collection(db, "promoCodes"), promoData);
+    // 2️⃣ Handle approved
+    if (newStatus === "approved" && promoCode) {
+      const validFrom = new Date();
+      const validTo = new Date(validFrom);
+      validTo.setDate(validTo.getDate() + 100);
 
-    // ✅ Step 3: Update partner document with status + promo info
-    await updateDoc(partnerRef, {
-      status: "approved",
-      promoId: promoRef.id,
-      promoCode: promoData.code,
-      discountPercentage: promoData.discountPercentage,
-      promoCodeValidTo: promoData.validTo,
-    });
+      // Update promoCode doc
+      if (partnerData.promoId) {
+        const promoRef = doc(db, "promoCodes", partnerData.promoId);
+        const promoSnap = await getDoc(promoRef);
 
-    // ✅ Step 4: Update related user document
+        if (promoSnap.exists()) {
+          const existingPromo = promoSnap.data();
+
+          promoData = {
+            code: partnerData.promoCode,
+            status: "active",
+            updatedAt: new Date(),
+          };
+
+          // ✅ Only set validFrom/validTo if they don’t already exist
+          if (!existingPromo.validFrom) {
+            promoData.validFrom = validFrom;
+          }
+          if (!existingPromo.validTo) {
+            promoData.validTo = validTo;
+          }
+
+          await updateDoc(promoRef, promoData);
+        }
+      }
+
+      // Update partner doc (always update status + expiry info)
+      await updateDoc(partnerRef, {
+        status: "approved",
+        promoCode,
+        promoCodeValidTo: validTo,
+        updatedAt: new Date(),
+      });
+    }
+    else if (newStatus === "declined") {
+      const promoRef = doc(db, "promoCodes", partnerData.promoId);
+      await updateDoc(partnerRef, {
+        status: "declined",
+        updatedAt: new Date(),
+      });
+      await updateDoc(promoRef, {
+        status: "inactive",
+        updatedAt: new Date(),
+      });
+
+
+    } else {
+      await updateDoc(partnerRef, {
+        status: newStatus,
+        updatedAt: new Date(),
+      });
+    }
+
+    // 3️⃣ Update related user doc
     let userEmail = null;
     if (userId) {
       const userRef = doc(db, "users", userId);
@@ -211,46 +303,67 @@ app.post("/api/partner/:partnerId/approve", async (req, res) => {
         userEmail = userData.email;
 
         await updateDoc(userRef, {
-          isPartner: true,
-          "partnerApplication.status": "approved"
+          isPartner: newStatus === "approved",
+          partnerApplication: {
+            ...(userData.partnerApplication || {}),
+            status: newStatus,
+            updatedAt: new Date(),
+          },
         });
       }
     }
 
-    // ✅ Step 5: Send approval email if email found
+    // 4️⃣ Send email
     if (userEmail) {
-      await transporter.sendMail({
-        from: process.env.EMAIL_USER,
-        to: userEmail,
-        subject: "🎉 Partner Application Approved",
-        html: `
-          <h2>Congratulations!</h2>
-          <p>Dear ${partnerData.name || "Partner"},</p>
-          <p>Your partner application has been <strong>approved</strong> ✅</p>
-          <p>Here are your promo details:</p>
-          <ul>
-            <li><strong>Promo Code:</strong> ${promoData.code}</li>
-            <li><strong>Discount:</strong> ${promoData.discountPercentage}%</li>
-            <li><strong>Valid Until:</strong> ${promoData.validTo || "No Expiry"}</li>
-          </ul>
-          <p>We’re excited to have you onboard 🚀</p>
-           <p><a href="https://yourwebsite.com/pricing">👉 login Now</a></p>
-        `,
-      });
-
-      console.log(`📧 Approval email sent to: ${userEmail}`);
+      if (newStatus === "approved" && promoData) {
+        await transporter.sendMail({
+          from: process.env.EMAIL_USER,
+          to: userEmail,
+          subject: "🎉 Partner Application Approved",
+          html: `
+            <h2>Congratulations!</h2>
+            <p>Dear ${partnerData.firstName || "Partner"},</p>
+            <p>Your partner application has been <strong>approved</strong> ✅</p>
+            <p>Here are your promo details:</p>
+            <ul>
+              <li><strong>Promo Code:</strong> ${promoData.code}</li>
+              <li><strong>Discount:</strong> ${promoData.discountRate * 100}%</li>
+              <li><strong>Valid Until:</strong> ${promoData.validTo}</li>
+            </ul>
+          `,
+        });
+      } else if (newStatus === "declined") {
+        await transporter.sendMail({
+          from: process.env.EMAIL_USER,
+          to: userEmail,
+          subject: "Partner Application Declined",
+          html: `
+            <h2>Application Declined</h2>
+            <p>Dear ${partnerData.firstName || "Partner"},</p>
+            <p>Your partner application has been <strong>declined</strong> ❌</p>
+          `,
+        });
+      }
     }
 
-    res.status(201).json({
-      message: "Partner approved, promo created, user updated & email sent",
-      promo: { firestoreId: promoRef.id, ...promoData },
+    // 5️⃣ Respond
+    res.status(200).json({
+      success: true,
+      message:
+        newStatus === "approved"
+          ? "✅ Partner approved, promo updated, user updated & email sent"
+          : newStatus === "declined"
+            ? "❌ Partner declined, user updated & email sent"
+            : `ℹ️ Partner status updated to ${newStatus}`,
+      promo: promoData || null,
     });
-
   } catch (error) {
-    console.error("🔥 Error approving partner + promo:", error);
-    res.status(500).json({ error: error.message }); // ✅ Show actual error message
+    console.error("🔥 Error updating partner application:", error);
+    res.status(500).json({ error: error.message });
   }
 });
+
+
 
 /**
  * Get All Partners
@@ -365,41 +478,56 @@ app.delete("/api/partner/:id", async (req, res) => {
   }
 });
 
-
-// ------------verify user-----------
-app.post("/api/verifyUser", async (req, res) => {
+// ✅ Verify Promo Code for a User
+app.get("/api/promocode/:userId/verify/:promoCode", async (req, res) => {
   try {
-    const { userId, promoCode } = req.body;
+    const { userId, promoCode } = req.params;
+
     if (!userId || !promoCode) {
       return res.status(400).json({ error: "userId and promoCode are required" });
     }
-    // :white_check_mark: 1. Check if record exists in partnerTracking
+
+    // 1️⃣ Check if record exists in partnerTracking (already used)
     const trackingQuery = query(
       collection(db, "partnerTracking"),
       where("userId", "==", userId),
       where("promoCode", "==", promoCode)
     );
     const trackingSnap = await getDocs(trackingQuery);
+
     if (!trackingSnap.empty) {
-      // user already used this promo
-      return res.json({ message: "code used already" });
+      return res.json({ message: "Promo code already used by this user" });
     }
-    // :white_check_mark: 2. If not used → fetch promo details
+
+    // 2️⃣ Fetch promo details
     const promoQuery = query(
       collection(db, "promoCodes"),
       where("code", "==", promoCode)
     );
     const promoSnap = await getDocs(promoQuery);
+
     if (promoSnap.empty) {
       return res.status(404).json({ error: "Promo code not found" });
     }
+
     const promoData = promoSnap.docs[0].data();
+
+    // 3️⃣ Check promo status
+    if (promoData.status === "inactive") {
+      return res.json({ message: "Promo code is inactive" });
+    } else if (promoData.status === "pending") {
+      return res.json({ message: "Promo code is pending approval" });
+    } else if (promoData.status !== "active") {
+      return res.json({ message: `Promo code is ${promoData.status}` });
+    }
+
+    // 4️⃣ If active → valid
     return res.json({
-      message: "code valid",
-      discountPercentage: promoData.discountPercentage || 0,
+      message: "Promo code is valid",
+      discountPercentage: promoData.discountRate || 0,
     });
   } catch (error) {
-    console.error(":fire: Error verifying user:", error.message);
+    console.error("🔥 Error verifying user promo:", error.message);
     res.status(500).json({ error: error.message });
   }
 });
@@ -601,8 +729,8 @@ app.post("/api/promoCode/use/:code", async (req, res) => {
     }
 
     // ✅ 4. Calculate discount
-    const discountPercentage = promoData.discountPercentage || 0;
-    const discountAmount = (amount * discountPercentage) / 100;
+    const discountPercentage = promoData.discountRate || 0;
+    const discountAmount = amount * discountPercentage
     const finalAmount = amount - discountAmount;
 
     // ✅ 5. Revenue Sharing
@@ -616,13 +744,13 @@ app.post("/api/promoCode/use/:code", async (req, res) => {
 
       if (partnerSnap.exists()) {
         const partnerData = partnerSnap.data();
-        if (partnerData.commission !== undefined) {
-          partnerSharePercentage = Number(partnerData.commission);
+        if (partnerData.commissionRate !== undefined) {
+          partnerSharePercentage = Number(partnerData.commissionRate);
         }
       }
     }
 
-    const partnerRevenue = (finalAmount * partnerSharePercentage) / 100;
+    const partnerRevenue = finalAmount * partnerSharePercentage;
     const companyRevenue = finalAmount - partnerRevenue;
 
     // ✅ 6. Increment times_used in promo
@@ -716,9 +844,9 @@ app.get("/api/types", async (req, res) => {
 
 
 // -----------partner stats---------------------------
-
+// /api/partner / stats /: partnerId
 // ✅ Get overall Stats for a partner
-app.get("/api/revenue/:partnerId", async (req, res) => {
+app.get("/api/partner/stats/:partnerId", async (req, res) => {
   try {
     const { partnerId } = req.params;
 
@@ -726,7 +854,7 @@ app.get("/api/revenue/:partnerId", async (req, res) => {
       return res.status(400).json({ error: "partnerId is required" });
     }
 
-    // ✅ Fetch all tracking entries for this partner
+    // 1️⃣ Fetch all tracking entries for this partner
     const trackingQuery = query(
       collection(db, "partnerTracking"),
       where("partnerId", "==", partnerId)
@@ -734,7 +862,7 @@ app.get("/api/revenue/:partnerId", async (req, res) => {
 
     const trackingSnap = await getDocs(trackingQuery);
 
-    // ✅ Initialize revenue variables (will stay 0 if no records exist)
+    // ✅ Initialize revenue variables
     let totalRevenue = 0;
     let korpoNetRevenue = 0;
     let partnerRevenue = 0;
@@ -742,8 +870,8 @@ app.get("/api/revenue/:partnerId", async (req, res) => {
     const userSet = new Set();
 
     if (!trackingSnap.empty) {
-      trackingSnap.forEach((doc) => {
-        const data = doc.data();
+      trackingSnap.forEach((docSnap) => {
+        const data = docSnap.data();
 
         totalRevenue += data.finalAmount || 0;
         korpoNetRevenue += data.companyRevenue || 0;
@@ -756,7 +884,7 @@ app.get("/api/revenue/:partnerId", async (req, res) => {
 
     const totalMembers = userSet.size;
 
-    // ✅ Fetch latest promo code details for this partner
+    // 2️⃣ Fetch latest promo code details for this partner
     const promoQuery = query(
       collection(db, "promoCodes"),
       where("partnerId", "==", partnerId)
@@ -784,7 +912,7 @@ app.get("/api/revenue/:partnerId", async (req, res) => {
       };
     }
 
-    // ✅ Always return a response, even with no tracking records
+    // ✅ Always return a response
     res.json({
       partnerId,
       totalRevenue,
@@ -795,13 +923,16 @@ app.get("/api/revenue/:partnerId", async (req, res) => {
       ...promoDetails,
     });
   } catch (error) {
-    console.error("🔥 Error fetching partner revenue:", error.message);
+    console.error("🔥 Error fetching partner stats:", error.message);
     res.status(500).json({ error: error.message });
   }
 });
 
+
+// /api/partner / stats / monthly /: partnerId
 // :white_check_mark: Monthly Status API
-app.get("/api/partner/monthlyStats/:partnerId", async (req, res) => {
+// ✅ Monthly Stats for a Partner
+app.get("/api/partner/stats/monthly/:partnerId", async (req, res) => {
   try {
     const { partnerId } = req.params;
     if (!partnerId) {
@@ -819,7 +950,7 @@ app.get("/api/partner/monthlyStats/:partnerId", async (req, res) => {
     let leftPromoCodes = 0;
     promoSnap.forEach((doc) => {
       const data = doc.data();
-      if (data.usageLimit !== undefined && data.timesUsed !== undefined) {
+      if (typeof data.usageLimit === "number" && typeof data.timesUsed === "number") {
         leftPromoCodes += Math.max(data.usageLimit - data.timesUsed, 0);
       }
     });
@@ -845,9 +976,17 @@ app.get("/api/partner/monthlyStats/:partnerId", async (req, res) => {
 
     trackingSnap.forEach((doc) => {
       const data = doc.data();
-      const usedAt = data.usedAt?.toDate ? data.usedAt.toDate() : new Date(data.usedAt);
+      let usedAt = null;
 
-      if (usedAt >= firstDayOfMonth && usedAt <= lastDayOfMonth) {
+      if (data.usedAt) {
+        if (typeof data.usedAt.toDate === "function") {
+          usedAt = data.usedAt.toDate();
+        } else {
+          usedAt = new Date(data.usedAt);
+        }
+      }
+
+      if (usedAt && usedAt >= firstDayOfMonth && usedAt <= lastDayOfMonth) {
         monthlyTotalFinalAmount += data.finalAmount || 0;
         monthlyTotalCompanyRevenue += data.companyRevenue || 0;
         monthlyTotalPartnerRevenue += data.partnerRevenue || 0;
@@ -861,7 +1000,7 @@ app.get("/api/partner/monthlyStats/:partnerId", async (req, res) => {
 
     const monthlyNewMembers = userSet.size;
 
-    // 3️⃣ Get latest promo code details (like revenue API)
+    // 3️⃣ Get latest promo code details
     let promoDetails = {};
     if (!promoSnap.empty) {
       const promos = promoSnap.docs
@@ -884,7 +1023,7 @@ app.get("/api/partner/monthlyStats/:partnerId", async (req, res) => {
       };
     }
 
-    // ✅ Format month like "March 2025"
+    // ✅ Format month like "September 2025"
     const monthFormatted = now.toLocaleString("en-US", { month: "long", year: "numeric" });
 
     // 4️⃣ Response
@@ -895,17 +1034,18 @@ app.get("/api/partner/monthlyStats/:partnerId", async (req, res) => {
       monthlyTotalRevenue: monthlyTotalFinalAmount,
       monthlyKorpoNetRevenue: monthlyTotalCompanyRevenue,
       monthlyPartnerRevenue: monthlyTotalPartnerRevenue,
-      monthlyTotalDiscountGiven: monthlyTotalDiscountGiven,
+      monthlyTotalDiscountGiven,
       monthlyNewMembers,
-      month: monthFormatted, // ✅ Now shows "March 2025"
+      month: monthFormatted,
       ...promoDetails,
     });
 
   } catch (error) {
-    console.error("🔥 Error fetching monthly status:", error.message);
+    console.error("🔥 Error fetching monthly stats:", error.message);
     res.status(500).json({ error: error.message });
   }
 });
+
 
 // _________________________AMBASSADOR ROUTES_________________________
 
@@ -1919,8 +2059,8 @@ app.post("/api/partner/approvePayout", async (req, res) => {
 
     const partner = partnerSnap.data();
 
-    // 3️⃣ Calculate payout (10% of referral_balance)
-    const payoutAmount = partner.totalPartnerRevenue; // Adjust field if necessary
+    // 3️⃣ Calculate payout
+    const payoutAmount = partner.availableBalance || 0; // ✅ use availableBalance
     if (payoutAmount <= 0) {
       return res.status(400).json({ error: "No balance available for payout" });
     }
@@ -1939,9 +2079,16 @@ app.post("/api/partner/approvePayout", async (req, res) => {
       status: "approved",
       approvedAt: serverTimestamp(),
       transferId: transfer.id,
+      amount: payoutAmount,
     });
 
-    // 6️⃣ Prepare response
+    // 6️⃣ Reset available balance for partner
+    await updateDoc(partnerRef, {
+      availableBalance: 0,
+      lastPayoutAt: serverTimestamp(),
+    });
+
+    // 7️⃣ Prepare response
     const formattedAmount = payoutAmount.toFixed(2);
     const partnerName = partner.name || "Partner";
 
@@ -1956,6 +2103,7 @@ app.post("/api/partner/approvePayout", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
 
 app.post("/api/partner/cancelPayout", async (req, res) => {
   const { requestId } = req.body;
