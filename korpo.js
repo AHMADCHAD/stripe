@@ -20,6 +20,8 @@ import {
   setDoc
 } from "firebase/firestore";
 import cors from "cors";
+import cron from "node-cron";
+import nodemailer from "nodemailer";
 
 dotenv.config();
 
@@ -36,6 +38,52 @@ app.use((req, res, next) => {
 });
 // ✅ Enable CORS for all routes & origins
 app.use(cors());
+
+// Setup transporter (for Gmail SMTP, or use SendGrid API instead)
+const transporter = nodemailer.createTransport({
+  service: "gmail",
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS,
+  },
+});
+
+
+// Runs every 1 minute
+cron.schedule("0 0 25 * *", async () => {
+  console.log("🚀 Sending monthly reminder (25th day)...");
+
+  const usersSnap = await getDocs(collection(db, "users"));
+
+  usersSnap.forEach(async (docSnap) => {
+    const user = docSnap.data();
+    if (user.email) {
+      await transporter.sendMail({
+        from: `"Korpo" <${process.env.EMAIL_USER}>`,
+        to: user.email,
+        subject: "Your Monthly Reminder",
+        html: `
+          <div style="font-family: Arial, sans-serif; padding: 20px; color: #333;">
+            <h2 style="color: #4CAF50;">Hello ${user.name || "there"},</h2>
+            <p>
+              This is your friendly monthly reminder from <b>Korpo</b>.  
+              We value your time and want to ensure you never miss important updates.
+            </p>
+            <p>
+              🔔 <b>Reminder:</b> Please take a moment to review your account and stay up to date.
+            </p>
+            <p style="margin-top: 20px;">Best regards,</p>
+            <p><b>Your Company Team</b></p>
+            <hr>
+            <small style="color: #777;">This is an automated message. Please do not reply.</small>
+          </div>
+        `,
+      });
+      console.log(`✅ Sent email to: ${user.email}`);
+    }
+  });
+});
+
 
 // ------------------- Test Endpoint -------------------
 app.get("/hello", (req, res) => {
@@ -110,6 +158,97 @@ app.post("/api/partner", async (req, res) => {
   } catch (error) {
     console.error("Error creating partner:", error);
     res.status(500).json({ error: "Failed to create partner" });
+  }
+});
+
+// Admin approves partner & create promo
+app.post("/api/partner/:partnerId/approve", async (req, res) => {
+  try {
+    const { partnerId } = req.params;
+    const { code, discountPercentage, validFrom, validTo, usageLimit } = req.body;
+
+    // ✅ Step 1: Fetch partner directly by docId
+    const partnerRef = doc(db, "partners", partnerId);
+    const partnerSnap = await getDoc(partnerRef);
+
+    if (!partnerSnap.exists()) {
+      return res.status(404).json({ error: "Partner not found" });
+    }
+
+    const partnerData = partnerSnap.data();
+    const userId = partnerData.userId;
+
+    // ✅ Step 2: Create promo code
+    const promoData = {
+      partnerId,
+      code,
+      discountPercentage: discountPercentage || 0,
+      validFrom: validFrom || null,
+      validTo: validTo || null,
+      usageLimit: usageLimit || null,
+      timesUsed: 0,
+      createdAt: serverTimestamp(),
+    };
+
+    const promoRef = await addDoc(collection(db, "promoCodes"), promoData);
+
+    // ✅ Step 3: Update partner document with status + promo info
+    await updateDoc(partnerRef, {
+      status: "approved",
+      promoId: promoRef.id,
+      promoCode: promoData.code,
+      discountPercentage: promoData.discountPercentage,
+      promoCodeValidTo: promoData.validTo,
+    });
+
+    // ✅ Step 4: Update related user document
+    let userEmail = null;
+    if (userId) {
+      const userRef = doc(db, "users", userId);
+      const userSnap = await getDoc(userRef);
+      if (userSnap.exists()) {
+        const userData = userSnap.data();
+        userEmail = userData.email;
+
+        await updateDoc(userRef, {
+          isPartner: true,
+          "partnerApplication.status": "approved"
+        });
+      }
+    }
+
+    // ✅ Step 5: Send approval email if email found
+    if (userEmail) {
+      await transporter.sendMail({
+        from: process.env.EMAIL_USER,
+        to: userEmail,
+        subject: "🎉 Partner Application Approved",
+        html: `
+          <h2>Congratulations!</h2>
+          <p>Dear ${partnerData.name || "Partner"},</p>
+          <p>Your partner application has been <strong>approved</strong> ✅</p>
+          <p>Here are your promo details:</p>
+          <ul>
+            <li><strong>Promo Code:</strong> ${promoData.code}</li>
+            <li><strong>Discount:</strong> ${promoData.discountPercentage}%</li>
+            <li><strong>Valid Until:</strong> ${promoData.validTo || "No Expiry"}</li>
+          </ul>
+          <p>We’re excited to have you onboard 🚀</p>
+           <p><a href="https://yourwebsite.com/pricing">👉 login Now</a></p>
+        `,
+      });
+
+      console.log(`📧 Approval email sent to: ${userEmail}`);
+    }
+
+    res.status(201).json({
+      message: "Partner approved, promo created, user updated & email sent",
+      promo: { firestoreId: promoRef.id, ...promoData },
+    });
+
+  } catch (error) {
+    console.error("🔥 Error approving partner + promo:", error);
+    res.status(500).json({ error: error.message }); // ✅ Show actual error message
   }
 });
 
@@ -267,66 +406,108 @@ app.post("/api/verifyUser", async (req, res) => {
 
 // ------------------- Promo Code Endpoints -------------------
 
-// Admin approves partner & create promo
-app.post("/api/partner/:partnerId/approve", async (req, res) => {
+
+// ✅ User purchases a plan -> only pass userId (static plan)
+app.post("/api/user/:userId/purchase", async (req, res) => {
   try {
-    const { partnerId } = req.params;
-    const { code, discountPercentage, validFrom, validTo, usageLimit } = req.body;
+    const { userId } = req.params;
 
-    // ✅ Step 1: Fetch partner directly by docId
-    const partnerRef = doc(db, "partners", partnerId);
-    const partnerSnap = await getDoc(partnerRef);
+    // ✅ Step 1: Get user details
+    const userRef = doc(db, "users", userId);
+    const userSnap = await getDoc(userRef);
 
-    if (!partnerSnap.exists()) {
-      return res.status(404).json({ error: "Partner not found" });
+    if (!userSnap.exists()) {
+      return res.status(400).json({ error: "Invalid userId" });
     }
 
-    const partnerData = partnerSnap.data();
-    const userId = partnerData.userId;
+    const userData = userSnap.data();
+    const userEmail = userData.email;
 
-    // ✅ Step 2: Create promo code
-    const promoData = {
-      partnerId,
-      code,
-      discountPercentage: discountPercentage || 0,
-      validFrom: validFrom || null,
-      validTo: validTo || null,
-      usageLimit: usageLimit || null,
-      timesUsed: 0,
-      createdAt: serverTimestamp(),
-    };
+    // ✅ Step 2: Static plan info
+    const planName = "Basic Plan";
+    const planPrice = 10; // USD
+    const planDuration = 30; // days
 
-    const promoRef = await addDoc(collection(db, "promoCodes"), promoData);
-
-    // ✅ Step 3: Update partner document with status + promo info
-    await updateDoc(partnerRef, {
-      status: "approved",
-      promoId: promoRef.id,
-      promoCode: promoData.code,
-      discountPercentage: promoData.discountPercentage,
-      promoCodeValidTo: promoData.validTo,
-    });
-
-    // ✅ Step 4: Update related user document
-    if (userId) {
-      const userRef = doc(db, "users", userId);
-      await updateDoc(userRef, {
-        isPartner: true,
-        "partnerApplication.status": "approved"
+    // ✅ Step 3: Send purchase confirmation email
+    if (userEmail) {
+      await transporter.sendMail({
+        from: process.env.EMAIL_USER,
+        to: userEmail,
+        subject: "✅ Plan Purchase Confirmation",
+        html: `
+          <h2>Thank you for your purchase 🎉</h2>
+          <p>Dear ${userData.name || "User"},</p>
+          <p>You have successfully purchased the following plan:</p>
+          <ul>
+            <li><strong>Plan:</strong> ${planName}</li>
+            <li><strong>Price:</strong> $${planPrice}</li>
+            <li><strong>Duration:</strong> ${planDuration} days</li>
+          </ul>
+          <p>Your plan is now active. Enjoy the benefits 🚀</p>
+        `,
       });
 
+      console.log(`📧 Purchase confirmation email sent to: ${userEmail}`);
     }
 
-    res.status(201).json({
-      message: "Partner approved, promo created & user updated",
-      promo: { firestoreId: promoRef.id, ...promoData },
+    res.status(200).json({
+      message: "Plan purchased successfully & email sent",
+      plan: { planName, planPrice, planDuration }
     });
-
   } catch (error) {
-    console.error("🔥 Error approving partner + promo:", error);
-    res.status(500).json({ error: error.message }); // ✅ Show actual error message
+    console.error("🔥 Error in plan purchase:", error);
+    res.status(500).json({ error: "Failed to process purchase" });
   }
 });
+
+app.post("/api/user/:userId/trial-reminder", async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    // ✅ Step 1: Get user details
+    const userRef = doc(db, "users", userId);
+    const userSnap = await getDoc(userRef);
+
+    if (!userSnap.exists()) {
+      return res.status(400).json({ error: "Invalid userId" });
+    }
+
+    const userData = userSnap.data();
+    const userEmail = userData.email;
+
+    // ✅ Step 2: Static trial info
+    const trialDays = 5; // static trial length
+    const currentTrialDay = 4; // ⚡ static check for demo (replace with logic later)
+
+    // ✅ Step 3: If trial day = 4, send reminder email
+    if (currentTrialDay === 4 && userEmail) {
+      await transporter.sendMail({
+        from: process.env.EMAIL_USER,
+        to: userEmail,
+        subject: "⚠️ Your Trial is Ending Soon",
+        html: `
+          <h2>Reminder: Trial Ending Soon</h2>
+          <p>Dear ${userData.name || "User"},</p>
+          <p>Your free trial will expire in <strong>1 day</strong>.</p>
+          <p>Please purchase your account to continue enjoying our services.</p>
+          <p><strong>Trial Days:</strong> ${currentTrialDay}/${trialDays}</p>
+          <p><a href="https://yourwebsite.com/pricing">👉 Upgrade Now</a></p>
+        `,
+      });
+
+      console.log(`📧 Trial reminder email sent to: ${userEmail}`);
+    }
+
+    res.status(200).json({
+      message: "Trial reminder checked",
+      trial: { currentTrialDay, trialDays },
+    });
+  } catch (error) {
+    console.error("🔥 Error in trial reminder:", error);
+    res.status(500).json({ error: "Failed to process trial reminder" });
+  }
+});
+
 
 // Get All Promo Codes
 app.get("/api/promoCodes", async (req, res) => {
