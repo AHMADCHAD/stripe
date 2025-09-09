@@ -808,7 +808,6 @@ app.post("/api/ambassador/submitApplication", async (req, res) => {
       updatedAt: serverTimestamp(),
       commissionRate: 0.1,
       totalReferrals: 0,
-      commissionEarned: 0,
       availableBalance: 0,
     };
 
