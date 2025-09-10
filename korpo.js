@@ -199,6 +199,16 @@ app.post("/api/partner/submitApplication", async (req, res) => {
       lastUpdated: new Date()
     });
 
+    // ✅ Step 5: Update user document with partnerApplication info
+    await updateDoc(userRef, {
+      partnerApplication: {
+        status: status || "pending",
+        createdAt: new Date(),
+        partnerId: userId,
+      },
+      hasAppliedForPartner: true,
+    });
+
     res.status(201).json({
       message: "Partner created successfully (awaiting admin approval)",
     });
@@ -208,10 +218,7 @@ app.post("/api/partner/submitApplication", async (req, res) => {
   }
 });
 
-
-
-
-app.post("/api/partner/:partnerId/updateApplicationStatus", async (req, res) => {
+app.post("/api/partner/:partnerId/updateStatus", async (req, res) => {
   try {
     const { partnerId } = req.params;
     const { newStatus } = req.body;
@@ -301,14 +308,14 @@ app.post("/api/partner/:partnerId/updateApplicationStatus", async (req, res) => 
       if (userSnap.exists()) {
         const userData = userSnap.data();
         userEmail = userData.email;
-
+        const existingApplication = userData.partnerApplication || {};
         await updateDoc(userRef, {
           isPartner: newStatus === "approved",
           partnerApplication: {
-            ...(userData.partnerApplication || {}),
+            ...existingApplication,   // ✅ Keep createdAt & partnerId intact
             status: newStatus,
             updatedAt: new Date(),
-          },
+          }
         });
       }
     }
@@ -362,8 +369,6 @@ app.post("/api/partner/:partnerId/updateApplicationStatus", async (req, res) => 
     res.status(500).json({ error: error.message });
   }
 });
-
-
 
 /**
  * Get All Partners
@@ -524,7 +529,7 @@ app.get("/api/promocode/:userId/verify/:promoCode", async (req, res) => {
     // 4️⃣ If active → valid
     return res.json({
       message: "Promo code is valid",
-      discountPercentage: promoData.discountRate || 0,
+      discountRate: promoData.discountRate || 0,
     });
   } catch (error) {
     console.error("🔥 Error verifying user promo:", error.message);
@@ -862,7 +867,6 @@ app.get("/api/partner/stats/:partnerId", async (req, res) => {
 
     const trackingSnap = await getDocs(trackingQuery);
 
-    // ✅ Initialize revenue variables
     let totalRevenue = 0;
     let korpoNetRevenue = 0;
     let partnerRevenue = 0;
@@ -904,12 +908,22 @@ app.get("/api/partner/stats/:partnerId", async (req, res) => {
 
       promoDetails = {
         promoId: latestPromo.id,
-        promoCode: latestPromo.code || null,
+        promoCode: latestPromo.promoCode || null,
         usageLimit,
         timesUsed,
         leftPromo,
         validTo: latestPromo.validTo || null,
       };
+    }
+
+    // 3️⃣ Fetch partner document (for availableBalance and other details)
+    const partnerRef = doc(db, "partners", partnerId);
+    const partnerSnap = await getDoc(partnerRef);
+
+    let availableBalance = 0;
+    if (partnerSnap.exists()) {
+      const partnerData = partnerSnap.data();
+      availableBalance = partnerData.availableBalance || 0;
     }
 
     // ✅ Always return a response
@@ -920,6 +934,7 @@ app.get("/api/partner/stats/:partnerId", async (req, res) => {
       partnerRevenue,
       totalDiscountGiven,
       totalMembers,
+      availableBalance, // ✅ now included
       ...promoDetails,
     });
   } catch (error) {
@@ -927,6 +942,7 @@ app.get("/api/partner/stats/:partnerId", async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
 
 
 // /api/partner / stats / monthly /: partnerId
@@ -1163,7 +1179,7 @@ app.post("/api/ambassador/submitApplication", async (req, res) => {
 });
 
 // ✅ Update Ambassador Application Status (Approve / Decline / etc.)
-app.post("/api/ambassador/updateApplicationStatus", async (req, res) => {
+app.post("/api/ambassador/updateStatus", async (req, res) => {
   console.log("📩 Update Ambassador Application Request:", req.body);
 
   try {
